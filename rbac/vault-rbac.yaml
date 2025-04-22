@@ -1,0 +1,24 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vault-role
+  namespace: infrastructure
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update", "delete", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vault-role-binding
+  namespace: infrastructure
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: infrastructure
+roleRef:
+  kind: Role
+  name: vault-role
+  apiGroup: rbac.authorization.k8s.io

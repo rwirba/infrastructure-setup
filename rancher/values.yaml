@@ -1,0 +1,8 @@
+hostname: rancher.mitechnology.org
+ingress:
+  tls:
+    source: letsEncrypt
+letsEncrypt:
+  email: admin@mitechnology.org
+  ingress:
+    class: nginx
