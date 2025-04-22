@@ -1,11 +1,12 @@
 #!/bin/bash
-
 set -e
 
+echo "📦 Ensuring Helm is installed..."
+if ! command -v helm &> /dev/null; then
+  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+fi
+
 echo "📦 Creating namespaces..."
-kubectl create namespace infrastructure --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace infrastructure --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace infrastructure --dry-run=client -o yaml | kubectl apply -f -
 kubectl create namespace infrastructure --dry-run=client -o yaml | kubectl apply -f -
 
 echo "🔧 Installing cert-manager..."
