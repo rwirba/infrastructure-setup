@@ -123,111 +123,91 @@ DOMAIN_RANCHER=rancher.mitechnology.org
 DOMAIN_JENKINS=jenkins.mitechnology.org
 DOMAIN_VAULT=vault.mitechnology.org
 
-# 0. Run as root
-if [[ "$EUID" -ne 0 ]]; then
-  echo "❌ Please run this script as root (sudo ./deploy.sh)"
-  exit 1
+echo "🔧 Installing Docker..."
+apt-get update -y
+apt-get install -y \
+  apt-transport-https ca-certificates curl software-properties-common gnupg lsb-release
+
+if ! command -v docker &>/dev/null; then
+  curl -fsSL https://get.docker.com | bash
 fi
 
-# 1. Install Docker
-if ! command -v docker &> /dev/null; then
-  echo "📦 Installing Docker..."
-  apt-get update
-  apt-get install -y ca-certificates curl gnupg lsb-release
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-  echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-    $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-  apt-get update
-  apt-get install -y docker-ce docker-ce-cli containerd.io
-fi
-
-# 2. Install K3s
-if ! command -v k3s &> /dev/null && ! systemctl is-active --quiet k3s; then
-  echo "🔧 Installing K3s..."
+echo "🐳 Installing K3s..."
+if ! command -v k3s &> /dev/null; then
   curl -sfL https://get.k3s.io | sh -
-  sleep 10
 fi
 
-# 3. Export kubeconfig
+echo "🔐 Setting kubeconfig for K3s..."
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+chmod 644 $KUBECONFIG
 
-# 4. Install kubectl manually (linked to k3s)
+echo "⏳ Waiting for Kubernetes API to become available..."
+until kubectl get nodes &>/dev/null; do sleep 3; done
+kubectl get nodes
+
+echo "📦 Installing kubectl..."
 if ! command -v kubectl &> /dev/null; then
-  ln -s /usr/local/bin/kubectl /usr/bin/kubectl || true
+  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+  install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+  rm kubectl
 fi
 
-# 5. Install Helm
+echo "📦 Installing Helm..."
 if ! command -v helm &> /dev/null; then
-  echo "📦 Installing Helm..."
   curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 fi
 
-# 6. Create namespace
+echo "📦 Creating namespace: $NAMESPACE"
 kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 
-# 7. Cert-Manager Setup
+echo "🔧 Installing cert-manager CRDs..."
 kubectl apply -f https://github.com/jetstack/cert-manager/releases/latest/download/cert-manager.crds.yaml
 
-helm repo add jetstack https://charts.jetstack.io || true
+echo "🎯 Installing cert-manager via Helm..."
+helm repo add jetstack https://charts.jetstack.io
 helm repo update
+helm upgrade --install cert-manager jetstack/cert-manager \
+  --namespace $NAMESPACE \
+  --set installCRDs=true \
+  --set ingressShim.defaultIssuerName=letsencrypt-prod \
+  --set ingressShim.defaultIssuerKind=ClusterIssuer \
+  --wait
 
-if ! helm status cert-manager -n $NAMESPACE &> /dev/null; then
-  echo "🔧 Installing cert-manager..."
-  helm install cert-manager jetstack/cert-manager \
-    --namespace $NAMESPACE \
-    --set installCRDs=true
-else
-  echo "ℹ️ cert-manager already installed. Skipping..."
-fi
+echo "🌍 Creating ClusterIssuer..."
+kubectl apply -f cert-manager/cluster-issuer.yaml
 
-# 8. Check Cloudflare API Token
+echo "🔐 Creating Cloudflare secret..."
 if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
-  echo "❌ CLOUDFLARE_API_TOKEN is not set. Please run:"
-  echo "   export CLOUDFLARE_API_TOKEN=your_token"
+  echo "❌ CLOUDFLARE_API_TOKEN is not set. Run: export CLOUDFLARE_API_TOKEN=your-token"
   exit 1
 fi
 
-# 9. Cloudflare DNS secret
-kubectl create secret generic cloudflare-api-token-secret \
-  --from-literal=api-token="$CLOUDFLARE_API_TOKEN" \
-  -n $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n $NAMESPACE create secret generic cloudflare-api-token-secret \
+  --from-literal=api-token="$CLOUDFLARE_API_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
 
-# 10. Apply ClusterIssuer
-kubectl apply -f cert-manager/cluster-issuer.yaml
-
-# 11. Install Rancher
-helm repo add rancher-latest https://releases.rancher.com/server-charts/latest || true
+echo "🚀 Installing Rancher..."
+helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
 helm repo update
+helm upgrade --install rancher rancher-latest/rancher \
+  --namespace $NAMESPACE \
+  --set hostname=$DOMAIN_RANCHER \
+  --set ingress.tls.source=letsEncrypt \
+  --set letsEncrypt.email=$EMAIL \
+  --set letsEncrypt.ingress.class=nginx \
+  --wait
 
-if ! helm status rancher -n $NAMESPACE &> /dev/null; then
-  echo "🚀 Installing Rancher..."
-  helm install rancher rancher-latest/rancher \
-    --namespace $NAMESPACE \
-    --set hostname=$DOMAIN_RANCHER \
-    --set ingress.tls.source=letsEncrypt \
-    --set letsEncrypt.email=$EMAIL \
-    --set letsEncrypt.ingress.class=nginx
-else
-  echo "ℹ️ Rancher already installed. Skipping..."
-fi
-
-# 12. Vault
+echo "🔒 Deploying Vault..."
 kubectl apply -f vault/service.yaml
 kubectl apply -f ingress/vault-ingress.yaml
 
-# 13. Jenkins
+echo "🧰 Deploying Jenkins..."
 kubectl apply -f jenkins/pvc.yaml
 kubectl apply -f jenkins/service.yaml
 kubectl apply -f ingress/jenkins-ingress.yaml
 
-# 14. RBAC
+echo "🛡️ Applying RBAC..."
 kubectl apply -f rbac/jenkins-rbac.yaml
 kubectl apply -f rbac/vault-rbac.yaml
 kubectl apply -f rbac/rancher-rbac.yaml
 
-echo "✅ All infrastructure components deployed successfully!"
-echo "🔐 Rancher password: "
-kubectl get secret --namespace cattle-system bootstrap-secret -o go-template='{{.data.bootstrapPassword|base64decode}}{{"\n"}}' || true
-
+echo "✅ All components deployed successfully!"
